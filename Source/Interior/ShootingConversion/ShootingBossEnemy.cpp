@@ -1,26 +1,92 @@
 #include "ShootingBossEnemy.h"
 
+#include "Components/BoxComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 #include "ShootingBossBullet.h"
-#include "ShootingBullet.h"
-#include "ShootingPlayer.h"
 #include "ShootingWaveManager.h"
+#include "Sound/SoundBase.h"
+#include "UObject/ConstructorHelpers.h"
+#include "UObject/UnrealType.h"
+
+namespace
+{
+	bool TryReadDamageAmount(AActor* Actor, float& OutDamageAmount)
+	{
+		if (!Actor)
+		{
+			return false;
+		}
+
+		if (const FProperty* Property = Actor->GetClass()->FindPropertyByName(TEXT("DamageAmount")))
+		{
+			if (const FFloatProperty* FloatProperty = CastField<FFloatProperty>(Property))
+			{
+				OutDamageAmount = FloatProperty->GetPropertyValue_InContainer(Actor);
+				return true;
+			}
+
+			if (const FIntProperty* IntProperty = CastField<FIntProperty>(Property))
+			{
+				OutDamageAmount = static_cast<float>(IntProperty->GetPropertyValue_InContainer(Actor));
+				return true;
+			}
+		}
+
+		return false;
+	}
+}
 
 AShootingBossEnemy::AShootingBossEnemy()
 {
 	PrimaryActorTick.bCanEverTick = true;
 
-	CollisionComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Collision"));
+	CollisionComponent = CreateDefaultSubobject<UBoxComponent>(TEXT("Collision"));
 	SetRootComponent(CollisionComponent);
+	CollisionComponent->SetBoxExtent(FVector(32.0f, 32.0f, 32.0f));
 	CollisionComponent->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	CollisionComponent->SetCollisionResponseToAllChannels(ECR_Overlap);
 	CollisionComponent->SetGenerateOverlapEvents(true);
 
+	BossMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Cube"));
+	BossMesh->SetupAttachment(CollisionComponent);
+	BossMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	BossMesh->SetGenerateOverlapEvents(false);
+	BossMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 10.0f));
+	BossMesh->SetRelativeRotation(FRotator(0.0f, 90.0f, 90.0f));
+	BossMesh->SetRelativeScale3D(FVector(1.0f, 1.0f, 1.0f));
+
 	BeamStart = CreateDefaultSubobject<USceneComponent>(TEXT("BeamStart"));
 	BeamStart->SetupAttachment(CollisionComponent);
+	BeamStart->SetRelativeLocation(FVector(0.0f, 0.0f, -31.0f));
+
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> BossMeshAsset(TEXT("/Game/Drone/Drone_low.Drone_low"));
+	if (BossMeshAsset.Succeeded())
+	{
+		BossMesh->SetStaticMesh(BossMeshAsset.Object);
+	}
+
+	ScoreValue = 1000;
+	DistanceTolerance = 150.0f;
+	MoveSpeed = 300.0f;
+	BossBulletClass = AShootingBossBullet::StaticClass();
+
+	static ConstructorHelpers::FObjectFinder<UNiagaraSystem> DeathEffectAsset(
+		TEXT("/Game/Fire_EXP_Vol01_Free/Niagara/EXP/NS_Sub_EXP_Large_001_01.NS_Sub_EXP_Large_001_01"));
+	if (DeathEffectAsset.Succeeded())
+	{
+		DeathEffect = DeathEffectAsset.Object;
+	}
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> DeathSoundAsset(TEXT("/Game/Explosion.Explosion"));
+	if (DeathSoundAsset.Succeeded())
+	{
+		DeathSound = DeathSoundAsset.Object;
+	}
 }
 
 void AShootingBossEnemy::BeginPlay()
@@ -32,13 +98,29 @@ void AShootingBossEnemy::BeginPlay()
 		CollisionComponent->OnComponentBeginOverlap.AddDynamic(this, &AShootingBossEnemy::OnCollisionBeginOverlap);
 	}
 
-	PlayerRef = Cast<AShootingPlayer>(UGameplayStatics::GetPlayerPawn(this, 0));
+	PlayerRef = UGameplayStatics::GetPlayerPawn(this, 0);
 	HP = MaxHP;
+	BeamTimer = BeamCooldown;
+
+	if (!BossBulletClass)
+	{
+		BossBulletClass = AShootingBossBullet::StaticClass();
+	}
+
+	if (IsValid(WaveManagerRef))
+	{
+		WaveManagerRef->UpdateBossUI(true, 1.0f);
+	}
 }
 
 void AShootingBossEnemy::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	if (!IsValid(PlayerRef))
+	{
+		PlayerRef = UGameplayStatics::GetPlayerPawn(this, 0);
+	}
 
 	if (Dead || !IsValid(PlayerRef))
 	{
@@ -92,18 +174,42 @@ void AShootingBossEnemy::Die(int32 ScoreToGive)
 
 void AShootingBossEnemy::FireBossBullet()
 {
-	if (!BossBulletClass || !IsValid(PlayerRef))
+	if (!IsValid(PlayerRef))
+	{
+		PlayerRef = UGameplayStatics::GetPlayerPawn(this, 0);
+	}
+
+	if (!IsValid(PlayerRef))
 	{
 		return;
 	}
 
-	const FVector DirectionToPlayer = (PlayerRef->GetActorLocation() - GetActorLocation()).GetSafeNormal();
-	const FTransform SpawnTransform = BeamStart ? BeamStart->GetComponentTransform() : GetActorTransform();
+	TSubclassOf<AShootingBossBullet> BulletClassToSpawn = BossBulletClass;
+	if (!BulletClassToSpawn)
+	{
+		BulletClassToSpawn = AShootingBossBullet::StaticClass();
+	}
+
+	FVector ToPlayer = PlayerRef->GetActorLocation() - GetActorLocation();
+	ToPlayer.X = 0.0f;
+	FVector DirectionToPlayer = ToPlayer.GetSafeNormal();
+	if (DirectionToPlayer.IsNearlyZero())
+	{
+		DirectionToPlayer = FVector(0.0f, 0.0f, -1.0f);
+	}
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	AShootingBossBullet* Bullet = GetWorld()->SpawnActor<AShootingBossBullet>(BossBulletClass, SpawnTransform, SpawnParams);
+	const FVector SpawnBaseLocation = BeamStart ? BeamStart->GetComponentLocation() : GetActorLocation();
+	const FVector SpawnLocation = SpawnBaseLocation + DirectionToPlayer * 90.0f;
+	const FRotator SpawnRotation = FRotationMatrix::MakeFromX(DirectionToPlayer).Rotator();
+
+	AShootingBossBullet* Bullet = GetWorld()->SpawnActor<AShootingBossBullet>(
+		BulletClassToSpawn,
+		SpawnLocation,
+		SpawnRotation,
+		SpawnParams);
 	if (!IsValid(Bullet))
 	{
 		return;
@@ -112,15 +218,16 @@ void AShootingBossEnemy::FireBossBullet()
 	Bullet->Direction = DirectionToPlayer;
 	Bullet->WaveManagerRef = WaveManagerRef;
 	Bullet->DamageAmount = BeamDamage;
-	Bullet->SetActorRotation(DirectionToPlayer.Rotation());
+	Bullet->SetActorRotation(SpawnRotation);
 }
 
 void AShootingBossEnemy::HandleOverlap(AActor* OtherActor)
 {
-	if (AShootingBullet* Bullet = Cast<AShootingBullet>(OtherActor))
+	float DamageAmount = 0.0f;
+	if (TryReadDamageAmount(OtherActor, DamageAmount))
 	{
-		ApplyDamageToEnemy(FMath::TruncToFloat(Bullet->DamageAmount));
-		Bullet->Destroy();
+		ApplyDamageToEnemy(FMath::TruncToFloat(DamageAmount));
+		OtherActor->Destroy();
 	}
 }
 
@@ -137,17 +244,35 @@ void AShootingBossEnemy::OnCollisionBeginOverlap(
 
 void AShootingBossEnemy::UpdateDistanceMovement(float DeltaSeconds)
 {
-	const FVector ToPlayer = PlayerRef->GetActorLocation() - GetActorLocation();
+	FVector ToPlayer = PlayerRef->GetActorLocation() - GetActorLocation();
+	ToPlayer.X = 0.0f;
 	const float Distance = ToPlayer.Length();
-	const FVector DirectionToPlayer = ToPlayer.GetSafeNormal();
+	FVector DirectionToPlayer = ToPlayer.GetSafeNormal();
+	if (DirectionToPlayer.IsNearlyZero())
+	{
+		DirectionToPlayer = FVector(0.0f, 0.0f, -1.0f);
+	}
 
+	FVector MoveDirection = FVector::ZeroVector;
 	if (Distance < DesiredDistance - DistanceTolerance)
 	{
-		SetActorLocation(GetActorLocation() - DirectionToPlayer * MoveSpeed * DeltaSeconds, false);
+		MoveDirection -= DirectionToPlayer;
 	}
 	else if (Distance > DesiredDistance + DistanceTolerance)
 	{
-		SetActorLocation(GetActorLocation() + DirectionToPlayer * MoveSpeed * DeltaSeconds, false);
+		MoveDirection += DirectionToPlayer;
+	}
+
+	const FVector StrafeDirection(0.0f, -DirectionToPlayer.Z, DirectionToPlayer.Y);
+	MoveDirection += StrafeDirection * FMath::Sin(GetWorld()->GetTimeSeconds() * 1.4f) * 0.75f;
+
+	if (!MoveDirection.IsNearlyZero())
+	{
+		FVector NewLocation = GetActorLocation() + MoveDirection.GetSafeNormal() * MoveSpeed * DeltaSeconds;
+		NewLocation.X = GetActorLocation().X;
+		NewLocation.Y = FMath::Clamp(NewLocation.Y, -520.0f, 520.0f);
+		NewLocation.Z = FMath::Clamp(NewLocation.Z, 200.0f, 1250.0f);
+		SetActorLocation(NewLocation, false);
 	}
 }
 

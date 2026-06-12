@@ -1,21 +1,21 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
 #include "ShootingBossEnemy.generated.h"
 
 class AShootingBossBullet;
-class AShootingBullet;
-class AShootingPlayer;
 class AShootingWaveManager;
+class APawn;
 class UNiagaraSystem;
+class UBoxComponent;
 class UPrimitiveComponent;
 class USceneComponent;
 class USoundBase;
 class UStaticMeshComponent;
 
 UCLASS(Blueprintable)
-class INTERIOR_API AShootingBossEnemy : public AActor
+class INTERIOR_API AShootingBossEnemy : public APawn
 {
 	GENERATED_BODY()
 
@@ -26,7 +26,10 @@ public:
 	virtual void Tick(float DeltaSeconds) override;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Boss")
-	TObjectPtr<UStaticMeshComponent> CollisionComponent;
+	TObjectPtr<UBoxComponent> CollisionComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Boss")
+	TObjectPtr<UStaticMeshComponent> BossMesh;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Boss")
 	TObjectPtr<USceneComponent> BeamStart;
@@ -35,7 +38,7 @@ public:
 	TObjectPtr<AShootingWaveManager> WaveManagerRef;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss")
-	TObjectPtr<AShootingPlayer> PlayerRef;
+	TObjectPtr<APawn> PlayerRef;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boss")
 	TSubclassOf<AShootingBossBullet> BossBulletClass;

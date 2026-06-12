@@ -1,22 +1,93 @@
 #include "ShootingEnemy.h"
 
+#include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInterface.h"
 #include "NiagaraFunctionLibrary.h"
-#include "ShootingBullet.h"
+#include "NiagaraSystem.h"
 #include "ShootingPlayer.h"
 #include "ShootingPowerUpOrb.h"
 #include "ShootingWaveManager.h"
+#include "Sound/SoundBase.h"
+#include "UObject/ConstructorHelpers.h"
+#include "UObject/UnrealType.h"
+
+namespace
+{
+	bool TryReadDamageAmount(AActor* Actor, float& OutDamageAmount)
+	{
+		if (!Actor)
+		{
+			return false;
+		}
+
+		if (const FProperty* Property = Actor->GetClass()->FindPropertyByName(TEXT("DamageAmount")))
+		{
+			if (const FFloatProperty* FloatProperty = CastField<FFloatProperty>(Property))
+			{
+				OutDamageAmount = FloatProperty->GetPropertyValue_InContainer(Actor);
+				return true;
+			}
+
+			if (const FIntProperty* IntProperty = CastField<FIntProperty>(Property))
+			{
+				OutDamageAmount = static_cast<float>(IntProperty->GetPropertyValue_InContainer(Actor));
+				return true;
+			}
+		}
+
+		return false;
+	}
+}
 
 AShootingEnemy::AShootingEnemy()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;
 
-	CollisionComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Collision"));
+	CollisionComponent = CreateDefaultSubobject<UBoxComponent>(TEXT("Collision"));
 	SetRootComponent(CollisionComponent);
+	CollisionComponent->SetBoxExtent(FVector(32.0f, 32.0f, 32.0f));
 	CollisionComponent->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	CollisionComponent->SetCollisionResponseToAllChannels(ECR_Overlap);
 	CollisionComponent->SetGenerateOverlapEvents(true);
+
+	EnemyMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Cube"));
+	EnemyMesh->SetupAttachment(CollisionComponent);
+	EnemyMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	EnemyMesh->SetGenerateOverlapEvents(false);
+	EnemyMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 10.0f));
+	EnemyMesh->SetRelativeRotation(FRotator(0.0f, 90.0f, -90.0f));
+	EnemyMesh->SetRelativeScale3D(FVector(0.332881f, 0.332881f, 0.332881f));
+
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> EnemyMeshAsset(TEXT("/Game/Drone/Drone_low.Drone_low"));
+	if (EnemyMeshAsset.Succeeded())
+	{
+		EnemyMesh->SetStaticMesh(EnemyMeshAsset.Object);
+	}
+
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> EnemyMaterialAsset(TEXT("/Game/Drone/M_Drone.M_Drone"));
+	if (EnemyMaterialAsset.Succeeded())
+	{
+		EnemyMesh->SetMaterial(0, EnemyMaterialAsset.Object);
+	}
+
+	ScoreValue = 100;
+	PowerUpOrbClass = AShootingPowerUpOrb::StaticClass();
+
+	static ConstructorHelpers::FObjectFinder<UNiagaraSystem> DeathEffectAsset(
+		TEXT("/Game/Fire_EXP_Vol01_Free/Niagara/EXP/NS_Sub_EXP_Large_001_01.NS_Sub_EXP_Large_001_01"));
+	if (DeathEffectAsset.Succeeded())
+	{
+		DeathEffect = DeathEffectAsset.Object;
+	}
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> DeathSoundAsset(TEXT("/Game/Explosion.Explosion"));
+	if (DeathSoundAsset.Succeeded())
+	{
+		DeathSound = DeathSoundAsset.Object;
+	}
 }
 
 void AShootingEnemy::BeginPlay()
@@ -26,6 +97,50 @@ void AShootingEnemy::BeginPlay()
 	if (CollisionComponent)
 	{
 		CollisionComponent->OnComponentBeginOverlap.AddDynamic(this, &AShootingEnemy::OnCollisionBeginOverlap);
+	}
+
+	PlayerRef = Cast<AShootingPlayer>(UGameplayStatics::GetPlayerPawn(this, 0));
+	SpawnDepthX = GetActorLocation().X;
+	SpawnBaseY = GetActorLocation().Y;
+	DriftPhase = FMath::FRandRange(0.0f, 6.283185f);
+}
+
+void AShootingEnemy::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if (Dead)
+	{
+		return;
+	}
+
+	FVector NewLocation = GetActorLocation();
+	NewLocation.X = SpawnDepthX;
+
+	FVector MoveDirection(0.0f, 0.0f, -1.0f);
+	if (IsValid(PlayerRef))
+	{
+		FVector ToPlayer = PlayerRef->GetActorLocation() - GetActorLocation();
+		ToPlayer.X = 0.0f;
+		const FVector DirectionToPlayer = ToPlayer.GetSafeNormal();
+		if (!DirectionToPlayer.IsNearlyZero())
+		{
+			MoveDirection = FMath::Lerp(FVector(0.0f, 0.0f, -1.0f), DirectionToPlayer, PlayerChaseWeight).GetSafeNormal();
+		}
+	}
+
+	NewLocation += MoveDirection * MoveSpeed * DeltaSeconds;
+
+	const float Time = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	NewLocation.Y += FMath::Sin(Time * HorizontalDriftSpeed + DriftPhase) * HorizontalDriftAmplitude * DeltaSeconds;
+
+	NewLocation.X = SpawnDepthX;
+	NewLocation.Y = FMath::Clamp(NewLocation.Y, -520.0f, 520.0f);
+	SetActorLocation(NewLocation, false);
+
+	if (GetActorLocation().Z < EscapeZ)
+	{
+		RemoveEscapedEnemy();
 	}
 }
 
@@ -87,14 +202,15 @@ void AShootingEnemy::TryDropPowerUp()
 
 void AShootingEnemy::HandleOverlap(AActor* OtherActor)
 {
-	if (AShootingBullet* Bullet = Cast<AShootingBullet>(OtherActor))
+	float DamageAmount = 0.0f;
+	if (TryReadDamageAmount(OtherActor, DamageAmount))
 	{
-		ApplyDamageToEnemy(FMath::TruncToFloat(Bullet->DamageAmount));
-		Bullet->Destroy();
+		ApplyDamageToEnemy(FMath::TruncToFloat(DamageAmount));
+		OtherActor->Destroy();
 		return;
 	}
 
-	if (OtherActor && OtherActor->IsA<AShootingPlayer>())
+	if (OtherActor && OtherActor == UGameplayStatics::GetPlayerPawn(this, 0))
 	{
 		if (IsValid(WaveManagerRef))
 		{
@@ -127,4 +243,21 @@ void AShootingEnemy::PlayDeathFeedback()
 	{
 		UGameplayStatics::PlaySound2D(this, DeathSound);
 	}
+}
+
+void AShootingEnemy::RemoveEscapedEnemy()
+{
+	if (Dead)
+	{
+		return;
+	}
+
+	Dead = true;
+
+	if (IsValid(WaveManagerRef))
+	{
+		WaveManagerRef->NotifyEnemyRemoved(0);
+	}
+
+	Destroy();
 }

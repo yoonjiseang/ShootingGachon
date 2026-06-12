@@ -1,15 +1,96 @@
 #include "ShootingWaveManager.h"
 
-#include "Blueprint/UserWidget.h"
+#include "Components/Image.h"
 #include "Components/InputComponent.h"
+#include "Components/ProgressBar.h"
+#include "Components/TextBlock.h"
+#include "Components/Widget.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "InputCoreTypes.h"
 #include "Kismet/GameplayStatics.h"
 #include "ShootingBossEnemy.h"
 #include "ShootingEnemy.h"
-#include "ShootingGameHUDWidget.h"
 #include "TimerManager.h"
+#include "Blueprint/WidgetTree.h"
+#include "Blueprint/UserWidget.h"
+#include "UObject/Class.h"
+
+namespace
+{
+	template <typename TWidgetType>
+	TWidgetType* FindNamedWidget(UUserWidget* UserWidget, std::initializer_list<const TCHAR*> CandidateNames)
+	{
+		if (!IsValid(UserWidget))
+		{
+			return nullptr;
+		}
+
+		for (const TCHAR* CandidateName : CandidateNames)
+		{
+			if (TWidgetType* FoundWidget = Cast<TWidgetType>(UserWidget->GetWidgetFromName(FName(CandidateName))))
+			{
+				return FoundWidget;
+			}
+		}
+
+		return nullptr;
+	}
+
+	template <typename TWidgetType>
+	TWidgetType* FindWidgetByNameParts(UUserWidget* UserWidget, std::initializer_list<const TCHAR*> RequiredNameParts)
+	{
+		if (!IsValid(UserWidget) || !UserWidget->WidgetTree)
+		{
+			return nullptr;
+		}
+
+		TArray<UWidget*> Widgets;
+		UserWidget->WidgetTree->GetAllWidgets(Widgets);
+		for (UWidget* Widget : Widgets)
+		{
+			TWidgetType* TypedWidget = Cast<TWidgetType>(Widget);
+			if (!TypedWidget)
+			{
+				continue;
+			}
+
+			const FString WidgetName = Widget->GetName();
+			bool bMatchesAllParts = true;
+			for (const TCHAR* RequiredNamePart : RequiredNameParts)
+			{
+				if (!WidgetName.Contains(RequiredNamePart, ESearchCase::IgnoreCase))
+				{
+					bMatchesAllParts = false;
+					break;
+				}
+			}
+
+			if (bMatchesAllParts)
+			{
+				return TypedWidget;
+			}
+		}
+
+		return nullptr;
+	}
+
+	FText FormatSecondsTwoDecimals(float Seconds)
+	{
+		FNumberFormattingOptions FormatOptions;
+		FormatOptions.SetMinimumFractionalDigits(2);
+		FormatOptions.SetMaximumFractionalDigits(2);
+		return FText::AsNumber(FMath::Max(Seconds, 0.0f), &FormatOptions);
+	}
+
+	FText FormatMultiplierOneDecimal(float Multiplier)
+	{
+		FNumberFormattingOptions FormatOptions;
+		FormatOptions.SetMinimumFractionalDigits(1);
+		FormatOptions.SetMaximumFractionalDigits(1);
+		return FText::AsNumber(Multiplier, &FormatOptions);
+	}
+}
 
 AShootingWaveManager::AShootingWaveManager()
 {
@@ -19,6 +100,8 @@ AShootingWaveManager::AShootingWaveManager()
 void AShootingWaveManager::BeginPlay()
 {
 	Super::BeginPlay();
+
+	ResetRuntimeStateForNewGame();
 
 	if (SpawnPointClass)
 	{
@@ -34,7 +117,7 @@ void AShootingWaveManager::BeginPlay()
 	APlayerController* PlayerController = UGameplayStatics::GetPlayerController(this, 0);
 	if (HUDWidgetClass && PlayerController)
 	{
-		HUDRef = CreateWidget<UShootingGameHUDWidget>(PlayerController, HUDWidgetClass);
+		HUDRef = CreateWidget<UUserWidget>(PlayerController, HUDWidgetClass);
 		if (HUDRef)
 		{
 			HUDRef->AddToViewport();
@@ -72,6 +155,45 @@ void AShootingWaveManager::Tick(float DeltaSeconds)
 		SpawnTimer = 0.0f;
 		SpawnOneEnemy();
 	}
+}
+
+void AShootingWaveManager::ResetRuntimeStateForNewGame()
+{
+	if (MaxPlayerHP <= 0.0f)
+	{
+		MaxPlayerHP = 3.0f;
+	}
+
+	if (SpawnCooldown <= 0.0f)
+	{
+		SpawnCooldown = 1.0f;
+	}
+
+	if (BossWaveInterval <= 0)
+	{
+		BossWaveInterval = 3;
+	}
+
+	CurrentBossRef = nullptr;
+	CurrentWave = 0;
+	CurrentScore = 0;
+	EnemiesToSpawnThisWave = 0;
+	SpawnedCount = 0;
+	AliveEnemyCount = 0;
+	SpawnTimer = 0.0f;
+	WaveRunning = false;
+	IsBossWave = false;
+	BossSpawnedThisWave = false;
+	ShowBossUI = false;
+	BossHPPercent = 1.0f;
+	PlayerHP = MaxPlayerHP;
+	PlayerInvincible = false;
+	InvincibleRemainingTime = 0.0f;
+	DamageMultiplier = 1.0f;
+	DamageBuffRemainingTime = 0.0f;
+	StartMessage = FText::GetEmpty();
+	ShowGameOverUI = false;
+	GameOver = false;
 }
 
 void AShootingWaveManager::StartWave()
@@ -224,19 +346,99 @@ void AShootingWaveManager::RefreshHUD()
 		return;
 	}
 
-	HUDRef->UpdateHUD(
-		CurrentWave,
-		CurrentScore,
-		PlayerHP,
-		StartMessage,
-		ShowBossUI,
-		BossHPPercent,
-		ShowGameOverUI);
+	if (UTextBlock* WaveText = FindNamedWidget<UTextBlock>(HUDRef, {TEXT("TXT_Wave"), TEXT("TXTWave")}))
+	{
+		WaveText->SetText(FText::Format(FText::FromString(TEXT("Wave: {0}")), FText::AsNumber(CurrentWave)));
+	}
 
-	HUDRef->UpdatePowerUpStatus(
-		InvincibleRemainingTime,
-		DamageMultiplier,
-		DamageBuffRemainingTime);
+	if (UTextBlock* ScoreText = FindNamedWidget<UTextBlock>(HUDRef, {TEXT("TXT_Score"), TEXT("TXTScore")}))
+	{
+		ScoreText->SetText(FText::Format(FText::FromString(TEXT("Score: {0}")), FText::AsNumber(CurrentScore)));
+	}
+
+	if (UTextBlock* HPText = FindNamedWidget<UTextBlock>(HUDRef, {TEXT("TXT_HP"), TEXT("TXTHP")}))
+	{
+		HPText->SetText(FText::Format(FText::FromString(TEXT("HP: {0}")), FText::AsNumber(FMath::RoundToInt(PlayerHP))));
+	}
+
+	if (UTextBlock* MessageText = FindNamedWidget<UTextBlock>(HUDRef, {TEXT("TXT_Message"), TEXT("TXTMessage")}))
+	{
+		MessageText->SetText(StartMessage);
+	}
+
+	const ESlateVisibility BossVisibility = ShowBossUI ? ESlateVisibility::Visible : ESlateVisibility::Hidden;
+	UTextBlock* BossText = FindNamedWidget<UTextBlock>(HUDRef, {TEXT("TXT_Boss"), TEXT("TXTBoss"), TEXT("TXT Boss")});
+	if (!BossText)
+	{
+		BossText = FindWidgetByNameParts<UTextBlock>(HUDRef, {TEXT("Boss")});
+	}
+	if (BossText)
+	{
+		BossText->SetVisibility(BossVisibility);
+	}
+
+	UProgressBar* BossHPBar = FindNamedWidget<UProgressBar>(HUDRef, {TEXT("PB_Boss_HP"), TEXT("PBBossHP"), TEXT("PB Boss HP")});
+	if (!BossHPBar)
+	{
+		BossHPBar = FindWidgetByNameParts<UProgressBar>(HUDRef, {TEXT("Boss")});
+	}
+	if (!BossHPBar)
+	{
+		BossHPBar = FindWidgetByNameParts<UProgressBar>(HUDRef, {TEXT("HP")});
+	}
+	if (BossHPBar)
+	{
+		BossHPBar->SetPercent(FMath::Clamp(BossHPPercent, 0.0f, 1.0f));
+		BossHPBar->SetVisibility(BossVisibility);
+		BossHPBar->SetRenderOpacity(1.0f);
+	}
+
+	const ESlateVisibility GameOverVisibility = ShowGameOverUI ? ESlateVisibility::Visible : ESlateVisibility::Hidden;
+	if (UImage* GameOverFade = FindNamedWidget<UImage>(HUDRef, {TEXT("IMG_GameOverFade"), TEXT("IMGGameOverFade")}))
+	{
+		GameOverFade->SetVisibility(GameOverVisibility);
+	}
+
+	if (UTextBlock* GameOverTitle = FindNamedWidget<UTextBlock>(HUDRef, {TEXT("TXT_GameOverTitle"), TEXT("TXTGameOverTitle")}))
+	{
+		GameOverTitle->SetVisibility(GameOverVisibility);
+	}
+
+	if (UTextBlock* RestartHint = FindNamedWidget<UTextBlock>(HUDRef, {TEXT("TXT_RestartHint"), TEXT("TXTRestartHint")}))
+	{
+		RestartHint->SetVisibility(GameOverVisibility);
+	}
+
+	if (UTextBlock* InvincibleStatus = FindNamedWidget<UTextBlock>(HUDRef, {TEXT("TXT_InvincibleStatus"), TEXT("TXTInvincibleStatus"), TEXT("TXT Invincible Status")}))
+	{
+		if (InvincibleRemainingTime > 0.0f)
+		{
+			InvincibleStatus->SetVisibility(ESlateVisibility::Visible);
+			InvincibleStatus->SetText(FText::Format(
+				FText::FromString(TEXT("\uBB34\uC801 {0}s")),
+				FText::AsNumber(FMath::CeilToInt(InvincibleRemainingTime))));
+		}
+		else
+		{
+			InvincibleStatus->SetVisibility(ESlateVisibility::Hidden);
+		}
+	}
+
+	if (UTextBlock* AttackStatus = FindNamedWidget<UTextBlock>(HUDRef, {TEXT("TXT_AttackStatus"), TEXT("TXTAttackStatus"), TEXT("TXT Attack Status")}))
+	{
+		AttackStatus->SetVisibility(ESlateVisibility::Visible);
+		if (DamageBuffRemainingTime > 0.0f)
+		{
+			AttackStatus->SetText(FText::Format(
+				FText::FromString(TEXT("\uACF5\uACA9 x{0} ({1}s)")),
+				FormatMultiplierOneDecimal(DamageMultiplier),
+				FormatSecondsTwoDecimals(DamageBuffRemainingTime)));
+		}
+		else
+		{
+			AttackStatus->SetText(FText::FromString(TEXT("\uACF5\uACA9 x1.0")));
+		}
+	}
 }
 
 void AShootingWaveManager::UpdateBossUI(bool bShowUI, float NewPercent)
@@ -272,6 +474,7 @@ void AShootingWaveManager::UpdatePowerUpTimers(float DeltaTime)
 void AShootingWaveManager::ApplyHealPowerUp(float HealAmount)
 {
 	PlayerHP = FMath::Min(PlayerHP + HealAmount, MaxPlayerHP);
+	RefreshHUD();
 }
 
 void AShootingWaveManager::ApplyInvinciblePowerUp(float Duration)

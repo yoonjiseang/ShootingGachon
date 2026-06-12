@@ -2,10 +2,13 @@
 
 #include "Components/StaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "ShootingPlayer.h"
 #include "ShootingWaveManager.h"
+#include "UObject/ConstructorHelpers.h"
 
 AShootingPowerUpOrb::AShootingPowerUpOrb()
 {
@@ -16,11 +19,28 @@ AShootingPowerUpOrb::AShootingPowerUpOrb()
 	OrbMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	OrbMesh->SetCollisionResponseToAllChannels(ECR_Overlap);
 	OrbMesh->SetGenerateOverlapEvents(true);
+	OrbMesh->SetRelativeScale3D(FVector(0.5f, 0.5f, 0.5f));
 
 	EffectText = CreateDefaultSubobject<UTextRenderComponent>(TEXT("EffectText"));
 	EffectText->SetupAttachment(OrbMesh);
 	EffectText->SetHorizontalAlignment(EHTA_Center);
 	EffectText->SetTextRenderColor(FColor::White);
+	EffectText->SetRelativeLocation(FVector(0.0f, 0.0f, 70.0f));
+	EffectText->SetWorldSize(36.0f);
+	EffectText->SetHorizontalAlignment(EHTA_Center);
+
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> OrbMeshAsset(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	if (OrbMeshAsset.Succeeded())
+	{
+		OrbMesh->SetStaticMesh(OrbMeshAsset.Object);
+	}
+
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> OrbMaterialAsset(
+		TEXT("/Game/Game/Material/M_PowerUpOrb.M_PowerUpOrb"));
+	if (OrbMaterialAsset.Succeeded())
+	{
+		SourceMaterial = OrbMaterialAsset.Object;
+	}
 }
 
 void AShootingPowerUpOrb::BeginPlay()

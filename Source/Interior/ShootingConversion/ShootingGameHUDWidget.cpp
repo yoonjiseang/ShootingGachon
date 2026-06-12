@@ -4,6 +4,25 @@
 #include "Components/ProgressBar.h"
 #include "Components/TextBlock.h"
 
+namespace
+{
+	FText FormatSecondsTwoDecimals(float Seconds)
+	{
+		FNumberFormattingOptions FormatOptions;
+		FormatOptions.SetMinimumFractionalDigits(2);
+		FormatOptions.SetMaximumFractionalDigits(2);
+		return FText::AsNumber(FMath::Max(Seconds, 0.0f), &FormatOptions);
+	}
+
+	FText FormatMultiplierOneDecimal(float Multiplier)
+	{
+		FNumberFormattingOptions FormatOptions;
+		FormatOptions.SetMinimumFractionalDigits(1);
+		FormatOptions.SetMaximumFractionalDigits(1);
+		return FText::AsNumber(Multiplier, &FormatOptions);
+	}
+}
+
 void UShootingGameHUDWidget::UpdateHUD(
 	int32 InWave,
 	int32 InScore,
@@ -70,8 +89,8 @@ void UShootingGameHUDWidget::UpdatePowerUpStatus(
 		{
 			TXTInvincibleStatus->SetVisibility(ESlateVisibility::Visible);
 			TXTInvincibleStatus->SetText(FText::Format(
-				FText::FromString(TEXT("무적 {0}s")),
-				FText::AsNumber(FMath::CeilToInt(InInvincibleTime))));
+				FText::FromString(TEXT("\uBB34\uC801 {0}s")),
+				FormatSecondsTwoDecimals(InInvincibleTime)));
 		}
 		else
 		{
@@ -85,13 +104,13 @@ void UShootingGameHUDWidget::UpdatePowerUpStatus(
 		if (InDamageTime > 0.0f)
 		{
 			TXTAttackStatus->SetText(FText::Format(
-				FText::FromString(TEXT("공격 x{0} ({1}s)")),
-				FText::AsNumber(InDamageMultiplier),
-				FText::AsNumber(FMath::CeilToInt(InDamageTime))));
+				FText::FromString(TEXT("\uACF5\uACA9 x{0} ({1}s)")),
+				FormatMultiplierOneDecimal(InDamageMultiplier),
+				FormatSecondsTwoDecimals(InDamageTime)));
 		}
 		else
 		{
-			TXTAttackStatus->SetText(FText::FromString(TEXT("공격 x1.0")));
+			TXTAttackStatus->SetText(FText::FromString(TEXT("\uACF5\uACA9 x1.0")));
 		}
 	}
 }

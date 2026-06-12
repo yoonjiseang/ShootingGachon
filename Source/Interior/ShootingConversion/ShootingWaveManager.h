@@ -6,7 +6,7 @@
 
 class AShootingBossEnemy;
 class AShootingEnemy;
-class UShootingGameHUDWidget;
+class UUserWidget;
 
 UCLASS(Blueprintable)
 class INTERIOR_API AShootingWaveManager : public AActor
@@ -32,7 +32,7 @@ public:
 	TObjectPtr<AActor> BossSpawnPoint;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Setup")
-	TSubclassOf<UShootingGameHUDWidget> HUDWidgetClass;
+	TSubclassOf<UUserWidget> HUDWidgetClass;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Setup")
 	FName RestartLevelName = TEXT("ShootingMap_Wave");
@@ -41,7 +41,7 @@ public:
 	TArray<TObjectPtr<AActor>> SpawnPoints;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Runtime")
-	TObjectPtr<UShootingGameHUDWidget> HUDRef;
+	TObjectPtr<UUserWidget> HUDRef;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Runtime")
 	TObjectPtr<AShootingBossEnemy> CurrentBossRef;
@@ -155,6 +155,7 @@ protected:
 	FTimerHandle ClearStartMessageTimerHandle;
 	FTimerHandle NextWaveTimerHandle;
 
+	void ResetRuntimeStateForNewGame();
 	void ClearStartMessageAndRefresh();
 	void ScheduleNextWave();
 };

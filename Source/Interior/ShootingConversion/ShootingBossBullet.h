@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
 #include "ShootingBossBullet.generated.h"
 
 class AShootingPlayer;
@@ -10,7 +10,7 @@ class UPrimitiveComponent;
 class UStaticMeshComponent;
 
 UCLASS(Blueprintable)
-class INTERIOR_API AShootingBossBullet : public AActor
+class INTERIOR_API AShootingBossBullet : public APawn
 {
 	GENERATED_BODY()
 
